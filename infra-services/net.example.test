@@ -1,0 +1,20 @@
+$TTL 1D
+@       IN      SOA     ns1.example.test. admin.example.test. (
+                        202607150; serial
+                        8H ; refresh
+                        4H ; retry
+                        4W ; expire
+                        1D ; minimum
+                        )
+@       IN      NS      ns1.example.test.
+
+
+ns1             IN      A       192.0.2.10
+vault           IN      A       192.0.2.10
+keycloak        IN      A       192.0.2.10
+gitlab-runner   IN      A       192.0.2.19
+gitlab          IN      A       192.0.2.20
+netbox          IN      A       192.0.2.21
+phpipam         IN      A       192.0.2.21
+demo-app        IN      A       192.0.2.21
+n8n             IN      A       192.0.2.21

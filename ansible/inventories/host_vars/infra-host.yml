@@ -1,0 +1,9 @@
+---
+nfs_exports:
+  - path: /srv/nfs/shared
+    owner: nobody
+    group: nogroup
+    mode: '0775'
+    clients:
+      - host: 192.0.2.0/24
+        options: rw,sync,no_subtree_check,root_squash

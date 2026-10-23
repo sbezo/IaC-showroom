@@ -1,0 +1,222 @@
+---
+- name: Install HashiCorp Vault
+  hosts: infra-host
+  gather_facts: false
+  become: true
+
+  vars:
+    vault_dns_name: vault.example.test
+    vault_ca_dir: /ca.example.test/ca.example.test
+    vault_config_dir: /etc/vault.d
+    vault_data_dir: /opt/vault/data
+    vault_tls_dir: /opt/vault/tls
+
+  handlers:
+    - name: Restart Vault
+      ansible.builtin.systemd:
+        name: vault
+        state: restarted
+
+    - name: Restart BIND9
+      ansible.builtin.service:
+        name: bind9
+        state: restarted
+
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Install HashiCorp repository prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - gpg
+          - openssl
+        state: present
+        update_cache: true
+
+    - name: Install HashiCorp repository signing key
+      ansible.builtin.get_url:
+        url: https://apt.releases.hashicorp.com/gpg
+        dest: /usr/share/keyrings/hashicorp-archive-keyring.asc
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Configure HashiCorp APT repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch=amd64 signed-by=/usr/share/keyrings/hashicorp-archive-keyring.asc]
+          https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main
+        filename: hashicorp
+        state: present
+        update_cache: true
+
+    - name: Install Vault Community Edition
+      ansible.builtin.apt:
+        name: vault
+        state: present
+
+    - name: Install BIND zone validation tooling
+      ansible.builtin.apt:
+        name: bind9-utils
+        state: present
+
+    - name: Create Vault data and TLS directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - path: "{{ vault_data_dir }}"
+          owner: vault
+          group: vault
+          mode: "0700"
+        - path: "{{ vault_tls_dir }}"
+          owner: root
+          group: vault
+          mode: "0750"
+
+    - name: Check lab CA files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ vault_ca_dir }}/ca.example.test.crt"
+        - "{{ vault_ca_dir }}/ca.example.test.key"
+      register: vault_ca_files
+
+    - name: Require the lab CA before issuing the Vault certificate
+      ansible.builtin.assert:
+        that:
+          - vault_ca_files.results[0].stat.exists
+          - vault_ca_files.results[1].stat.exists
+        fail_msg: >-
+          The lab CA is missing under {{ vault_ca_dir }}. Run
+          install_infra-services.yml before install_vault.yml.
+
+    - name: Generate Vault TLS private key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - genrsa
+          - -out
+          - "{{ vault_tls_dir }}/vault-key.pem"
+          - "3072"
+        creates: "{{ vault_tls_dir }}/vault-key.pem"
+      notify: Restart Vault
+
+    - name: Generate Vault TLS certificate request
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -new
+          - -key
+          - "{{ vault_tls_dir }}/vault-key.pem"
+          - -subj
+          - "/C=SK/O=LabCA/CN={{ vault_dns_name }}"
+          - -addext
+          - "subjectAltName=DNS:{{ vault_dns_name }},IP:{{ ansible_host }}"
+          - -out
+          - "{{ vault_tls_dir }}/vault.csr"
+        creates: "{{ vault_tls_dir }}/vault.csr"
+      notify: Restart Vault
+
+    - name: Sign Vault TLS certificate with the lab CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - "{{ vault_tls_dir }}/vault.csr"
+          - -CA
+          - "{{ vault_ca_dir }}/ca.example.test.crt"
+          - -CAkey
+          - "{{ vault_ca_dir }}/ca.example.test.key"
+          - -CAcreateserial
+          - -out
+          - "{{ vault_tls_dir }}/vault-cert.pem"
+          - -days
+          - "825"
+          - -sha256
+          - -copy_extensions
+          - copy
+        creates: "{{ vault_tls_dir }}/vault-cert.pem"
+      notify: Restart Vault
+
+    - name: Copy lab CA certificate for Vault
+      ansible.builtin.copy:
+        src: "{{ vault_ca_dir }}/ca.example.test.crt"
+        dest: "{{ vault_tls_dir }}/vault-ca.pem"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Vault
+
+    - name: Protect Vault TLS private key
+      ansible.builtin.file:
+        path: "{{ vault_tls_dir }}/vault-key.pem"
+        owner: root
+        group: vault
+        mode: "0640"
+      notify: Restart Vault
+
+    - name: Set Vault certificate permissions
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - "{{ vault_tls_dir }}/vault-cert.pem"
+        - "{{ vault_tls_dir }}/vault.csr"
+      notify: Restart Vault
+
+    - name: Install Vault server configuration
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/vault/config/vault.hcl"
+        dest: "{{ vault_config_dir }}/vault.hcl"
+        owner: root
+        group: vault
+        mode: "0640"
+      notify: Restart Vault
+
+    - name: Publish Vault in lab DNS
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/net.example.test"
+        dest: /etc/bind/zones/net.example.test
+        owner: root
+        group: root
+        mode: "0644"
+        validate: /usr/bin/named-checkzone example.test %s
+      notify: Restart BIND9
+
+    - name: Enable and start Vault service
+      ansible.builtin.systemd:
+        name: vault
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply pending Vault and DNS changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the Vault API and UI listener
+      ansible.builtin.uri:
+        url: >-
+          https://{{ ansible_host }}:8200/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
+        method: GET
+        status_code: 200
+        ca_path: "{{ vault_tls_dir }}/vault-ca.pem"
+        validate_certs: true
+        use_proxy: false
+      register: vault_health
+      retries: 12
+      delay: 5
+      until: vault_health.status == 200

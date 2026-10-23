@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!requirements.txt
+!api.py
+!email/
+email/*
+!email/requirements.txt
+!email/process_emails.py
+!email/init_db.py

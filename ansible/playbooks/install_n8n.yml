@@ -1,0 +1,174 @@
+- hosts: app-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Create n8n directory
+      ansible.builtin.file:
+        path: /opt/n8n
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy docker-compose.yml
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/docker-compose.yml"
+        dest: /opt/n8n/docker-compose.yml
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart n8n
+
+    - name: Copy n8n credentials
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/.env"
+        dest: /opt/n8n/.env
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      diff: false
+      notify: Restart n8n
+
+    - name: Copy PostgreSQL initialization script
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/init-db.sh"
+        dest: /opt/n8n/init-db.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy automation database provisioning script
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/provision-automation.sh"
+        dest: /opt/n8n/provision-automation.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install owner password hashing packages
+      ansible.builtin.apt:
+        name:
+          - python3-bcrypt
+          - python3-dotenv
+        state: present
+
+    - name: Copy owner password preparation script
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/prepare_owner.py"
+        dest: /opt/n8n/prepare_owner.py
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Prepare the owner password hash
+      ansible.builtin.command: python3 /opt/n8n/prepare_owner.py
+      register: owner_result
+      changed_when: "'Owner password hash prepared.' in owner_result.stdout"
+      no_log: true
+      notify: Restart n8n
+
+    - name: Deploy systemd service for n8n
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/n8n.service"
+        dest: /etc/systemd/system/n8n.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart n8n
+
+    - name: Reload systemd to pick up the service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable and start n8n service
+      ansible.builtin.systemd:
+        name: n8n
+        enabled: yes
+        state: started
+
+    - name: Apply pending n8n configuration before provisioning the database
+      ansible.builtin.meta: flush_handlers
+
+    - name: Create or update the automation database and user
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/docker
+          - compose
+          - exec
+          - -T
+          - postgres
+          - sh
+          - /docker-entrypoint-initdb.d/provision-automation.sh
+        chdir: /opt/n8n
+      # The script synchronizes the database password on every deployment.
+      changed_when: true
+      no_log: true
+
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Create SSL directory
+      ansible.builtin.file:
+        path: /etc/nginx/ssl
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy SSL certificate for n8n.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/certs/n8n.example.test.crt"
+        dest: /etc/nginx/ssl/n8n.example.test.crt
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Nginx
+
+    - name: Copy SSL private key for n8n.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/certs/n8n.example.test.key"
+        dest: /etc/nginx/ssl/n8n.example.test.key
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      diff: false
+      notify: Reload Nginx
+
+    - name: Copy Nginx configuration for n8n
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/n8n/nginx.conf"
+        dest: /etc/nginx/conf.d/n8n.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Nginx
+
+    - name: Check Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Enable and start Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: Restart n8n
+      ansible.builtin.systemd:
+        name: n8n
+        state: restarted
+
+    - name: Reload Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

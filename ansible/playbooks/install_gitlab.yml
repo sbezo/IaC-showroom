@@ -1,0 +1,170 @@
+- hosts: gitlab-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Ensure growpart is installed
+      ansible.builtin.package:
+        name: cloud-guest-utils
+        state: present
+
+    - name: Expand root partition /dev/sda3
+      ansible.builtin.command: growpart /dev/sda 3
+      register: growpart_result
+      failed_when: "'NOCHANGE' not in growpart_result.stdout and growpart_result.rc != 0"
+      changed_when: "'NOCHANGE' not in growpart_result.stdout"
+
+    - name: Extend logical volume to all free space
+      community.general.lvol:
+        vg: ubuntu-vg
+        lv: ubuntu-lv
+        size: +100%FREE
+        resizefs: yes
+
+    - name: Ensure GITLAB_HOME is set system-wide
+      become: yes
+      ansible.builtin.lineinfile:
+        path: /etc/environment
+        line: 'GITLAB_HOME=/srv/gitlab'
+        create: yes
+
+    - name: Create GitLab directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /srv/gitlab
+        - /srv/gitlab/config
+        - /srv/gitlab/config/ssl
+        - /srv/gitlab/config/trusted-certs
+        - /srv/gitlab/logs
+        - /srv/gitlab/data
+
+    - name: Copy docker-compose.yml
+      copy:
+        src: "{{ root_dir }}/gitlab/docker-compose.yml"
+        dest: /srv/gitlab/docker-compose.yml
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Deploy systemd service for gitlab
+      ansible.builtin.template:
+        src: "{{ root_dir }}/gitlab/gitlab.service"
+        dest: /etc/systemd/system/gitlab.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Set GitLab external URL
+      ansible.builtin.lineinfile:
+        path: "/srv/gitlab/config/gitlab.rb"
+        regexp: '^\s*#?\s*external_url\s+.*$'
+        line: 'external_url "https://gitlab.example.test"'
+        create: true
+        owner: root
+        group: root
+        mode: '0600'
+      diff: false
+
+    - name: Disable Let's Encrypt
+      ansible.builtin.lineinfile:
+        path: "/srv/gitlab/config/gitlab.rb"
+        regexp: '^\s*#?\s*letsencrypt\[.enable.\]\s*=.*$'
+        line: "letsencrypt['enable'] = false"
+      diff: false
+
+    - name: Copy SSL certificate to host
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/gitlab/certs/gitlab.example.test.crt"
+        dest: /srv/gitlab/config/ssl/
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy SSL private key to host
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/gitlab/certs/gitlab.example.test.key"
+        dest: /srv/gitlab/config/ssl/
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      diff: false
+
+    - name: Copy SSL CA cert to host - trusted-certs
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/gitlab/certs/ca.example.test.crt"
+        dest: /srv/gitlab/config/trusted-certs/
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy SSL cert to host - trusted-certs
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/gitlab/certs/gitlab.example.test.crt"
+        dest: /srv/gitlab/config/trusted-certs/
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable and start GitLab service
+      ansible.builtin.systemd:
+        name: gitlab
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Reconfigure GitLab
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - gitlab
+          - gitlab-ctl
+          - reconfigure
+
+    - name: Remove legacy password script from host
+      ansible.builtin.file:
+        path: /tmp/reset_password.rb
+        state: absent
+      no_log: true
+      diff: false
+
+    - name: Remove legacy password script from container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - gitlab
+          - rm
+          - -f
+          - /tmp/reset_password.rb
+      no_log: true
+
+    - name: Set GitLab root password through standard input
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - -i
+          - gitlab
+          - gitlab-rails
+          - runner
+          - |
+            password = STDIN.read
+            raise 'Root password must not be empty' if password.empty?
+            user = User.find_by_username!('root')
+            user.password = password
+            user.password_confirmation = password
+            user.save!
+        stdin: "{{ lookup('ansible.builtin.ini', 'GITLAB_ROOT_PASSWORD', type='properties', file=root_dir + '/gitlab/.env', case_sensitive=true) }}"
+        stdin_add_newline: false
+      no_log: true

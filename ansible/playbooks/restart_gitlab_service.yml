@@ -1,0 +1,18 @@
+- hosts: gitlab-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Stop gitlab service
+      ansible.builtin.systemd:
+        name: gitlab
+        state: stopped
+
+    - name: Start gitlab service
+      ansible.builtin.systemd:
+        name: gitlab
+        state: started

@@ -1,0 +1,5 @@
+zone "example.test" IN {
+    type master;
+    file "/etc/bind/zones/net.example.test";
+    allow-transfer { none; };
+};

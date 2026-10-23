@@ -1,0 +1,101 @@
+- hosts: infra-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Install DHCP
+      ansible.builtin.apt:
+        name: isc-dhcp-server
+        state: present
+        update_cache: yes
+
+    - name: Install DNS
+      ansible.builtin.apt:
+        name: bind9
+        state: present
+        update_cache: yes
+
+    - name: Update DHCP config
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/dhcpd.conf"
+        dest: /etc/dhcp/dhcpd.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update named.conf.options
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/named.conf.options"
+        dest: /etc/bind/named.conf.options
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update named.conf.local
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/named.conf.local"
+        dest: /etc/bind/named.conf.local
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create new zones root_dir
+      ansible.builtin.file:
+        path: /etc/bind/zones
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Update net.example.test zone file
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/net.example.test"
+        dest: /etc/bind/zones/net.example.test
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy DHCP service file
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/dhcpd.service"
+        dest: /etc/systemd/system/dhcpd.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create dir for ca.example.test
+      ansible.builtin.file:
+        path: /ca.example.test/
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy ca files
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/ca.example.test/"
+        dest: /ca.example.test/
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Protect CA
+      ansible.builtin.file:
+        path: /ca.example.test/ca.example.test/ca.example.test.key
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
+
+
+
+    - name: Create a locked transfer account; supply an SSH public key separately
+      user:
+        name: "transfer"
+        password_lock: true
+        shell: /bin/bash
+        create_home: yes

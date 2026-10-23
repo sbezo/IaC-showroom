@@ -1,0 +1,20 @@
+[Unit]
+Description=Scripts via API Docker Compose Service
+Requires=docker.service n8n.service
+After=docker.service n8n.service
+PartOf=n8n.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/scripts_via_api
+ExecStartPre=/usr/bin/docker network inspect n8n_default
+ExecStartPre=/usr/bin/docker compose --env-file /dev/null build
+ExecStartPre=/usr/bin/docker compose --env-file /dev/null run --rm --no-deps scripts-api python email/init_db.py
+ExecStart=/usr/bin/docker compose --env-file /dev/null up -d --wait --wait-timeout 300
+ExecStop=/usr/bin/docker compose --env-file /dev/null stop --timeout 310
+TimeoutStartSec=900
+TimeoutStopSec=330
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,86 @@
+- hosts: app-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Create SSL directory
+      ansible.builtin.file:
+        path: /etc/nginx/ssl
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy SSL certificate for netbox.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/certs/netbox.example.test/netbox.example.test.crt"
+        dest: /etc/nginx/ssl/netbox.example.test.crt
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy SSL key for netbox.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/certs/netbox.example.test/netbox.example.test.key"
+        dest: /etc/nginx/ssl/netbox.example.test.key
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Copy SSL certificate for phpipam.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/certs/phpipam.example.test/phpipam.example.test.crt"
+        dest: /etc/nginx/ssl/phpipam.example.test.crt
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy SSL key for phpipam.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/certs/phpipam.example.test/phpipam.example.test.key"
+        dest: /etc/nginx/ssl/phpipam.example.test.key
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Copy SSL certificate for demo-app.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/certs/demo-app.example.test/demo-app.example.test.crt"
+        dest: /etc/nginx/ssl/demo-app.example.test.crt
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy SSL key for demo-app.example.test
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/certs/demo-app.example.test/demo-app.example.test.key"
+        dest: /etc/nginx/ssl/demo-app.example.test.key
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Copy reverse proxy config
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/nginx/reverse-proxy.conf"
+        dest: /etc/nginx/conf.d/reverse-proxy.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Nginx
+
+  handlers:
+    - name: Restart Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+        enabled: true

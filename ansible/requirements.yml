@@ -1,0 +1,5 @@
+---
+collections:
+  - name: community.postgresql
+    version: "3.9.0"
+  - name: community.general

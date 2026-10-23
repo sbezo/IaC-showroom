@@ -1,0 +1,33 @@
+- hosts: runner-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Download GitLab Runner repo install script
+      ansible.builtin.get_url:
+        url: "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh"
+        dest: /tmp/gitlab-runner-repo.sh
+        mode: '0755'
+
+    - name: Run GitLab Runner repo setup script
+      ansible.builtin.command: bash /tmp/gitlab-runner-repo.sh
+      become: yes
+
+    - name: Update apt and install gitlab-runner
+      apt:
+        pkg:
+        - gitlab-runner
+        state: latest
+        update_cache: true
+
+    - name: Copy CA SSL certificate to host
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/gitlab-runner/ca.example.test.crt"
+        dest: /tmp/
+        owner: root
+        group: root
+        mode: '0644'

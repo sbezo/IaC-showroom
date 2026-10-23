@@ -1,0 +1,13 @@
+[Unit]
+Description=ISC DHCP Server
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/run/dhcpd.pid
+ExecStart=/usr/sbin/dhcpd -q -4 -cf /etc/dhcp/dhcpd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

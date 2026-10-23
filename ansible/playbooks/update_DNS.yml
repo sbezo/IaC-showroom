@@ -1,0 +1,22 @@
+- hosts: infra-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+
+    - name: Update net.example.test zone file
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/infra-services/net.example.test"
+        dest: /etc/bind/zones/net.example.test
+        owner: root
+        group: root
+        mode: '0644'
+
+
+    - name: Enable and start BIND9 service
+      ansible.builtin.command:
+        cmd: systemctl restart bind9

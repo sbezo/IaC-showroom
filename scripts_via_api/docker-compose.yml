@@ -1,0 +1,26 @@
+services:
+  scripts-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      EMAIL_DATA_DIR: /data/email
+    volumes:
+      - scripts_data:/data
+      # Secrets are read by Python from this file, not injected into Compose.
+      - ./.env:/app/.env:ro
+    # The API listens on 0.0.0.0:8000 inside the container.
+    # n8n calls http://scripts-api:8000; no host port is published.
+    expose:
+      - "8000"
+    networks:
+      - n8n
+
+volumes:
+  # Persist downloaded emails and processing history across container rebuilds.
+  scripts_data:
+
+networks:
+  n8n:
+    external: true
+    name: n8n_default

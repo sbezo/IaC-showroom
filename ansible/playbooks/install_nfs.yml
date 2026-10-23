@@ -1,0 +1,49 @@
+---
+- name: Install and configure NFS server
+  hosts: infra-host
+  gather_facts: false
+  become: yes
+
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Install NFS server
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Create NFS export directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ nfs_exports }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Configure NFS exports
+      ansible.builtin.template:
+        src: "{{ root_dir }}/nfs/exports.j2"
+        dest: /etc/exports
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload NFS exports
+
+    - name: Enable and start NFS server
+      ansible.builtin.service:
+        name: nfs-kernel-server
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: Reload NFS exports
+      ansible.builtin.command: /usr/sbin/exportfs -ra
+      changed_when: true

@@ -1,0 +1,52 @@
+- hosts: app-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Create phpipam directory
+      ansible.builtin.file:
+        path: /opt/phpipam
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy docker-compose.yml
+      copy:
+        src: "{{ root_dir }}/phpipam/docker-compose.yml"
+        dest: /opt/phpipam/docker-compose.yml
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy phpIPAM .env file
+      ansible.builtin.copy:
+        src: "{{ root_dir }}/phpipam/.env"
+        dest: /opt/phpipam/.env
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      diff: false
+
+    - name: Deploy systemd service for phpIPAM
+      ansible.builtin.template:
+        src: "{{ root_dir }}/phpipam/phpipam.service"
+        dest: /etc/systemd/system/phpipam.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Reload systemd to pick up new unit
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable and start phpIPAM service
+      ansible.builtin.systemd:
+        name: phpipam
+        enabled: yes
+        state: started

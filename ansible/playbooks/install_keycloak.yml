@@ -1,0 +1,590 @@
+---
+- name: Install Keycloak as a systemd service
+  hosts: "{{ keycloak_hosts | default('infra-host') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    # Keep the checksum paired with keycloak_version when upgrading.
+    keycloak_version: "26.7.0"
+    keycloak_archive_checksum: >-
+      sha256:f771df0aa1e4820f57d56f7d6d015beb6415487b43f8de7e5a6d48f8a7fe118a
+    keycloak_archive_url: >-
+      https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz
+
+    keycloak_user: keycloak
+    keycloak_group: keycloak
+    keycloak_install_dir: "/opt/keycloak-{{ keycloak_version }}"
+    keycloak_home: /opt/keycloak
+    keycloak_config_dir: /etc/keycloak
+    keycloak_data_dir: /var/lib/keycloak
+    keycloak_download_dir: /var/cache/keycloak
+    keycloak_env_file: "{{ root_dir }}/keycloak/.env"
+
+    keycloak_hostname: keycloak.example.test
+    keycloak_https_port: 8443
+    keycloak_management_port: 9000
+    # Illustrative runtime selection; review compatibility before adapting.
+    keycloak_java_package: openjdk-17-jre-headless
+    keycloak_java_opts: >-
+      -Xms256m -Xmx1024m -XX:MaxMetaspaceSize=512m
+      -Djava.net.preferIPv4Stack=true
+
+    keycloak_db: postgres
+    keycloak_db_host: 127.0.0.1
+    keycloak_db_port: 5432
+    keycloak_db_name: keycloak
+    keycloak_manage_postgresql: true
+
+    keycloak_ca_dir: /ca.example.test/ca.example.test
+    keycloak_tls_dir: /etc/keycloak/tls
+    keycloak_publish_lab_dns: true
+    keycloak_dns_zone_source: "{{ root_dir }}/infra-services/net.example.test"
+
+    keycloak_build_marker: >-
+      {{ keycloak_install_dir }}/.ansible-build-{{ keycloak_db }}-health-metrics
+    keycloak_bootstrap_marker: >-
+      {{ keycloak_data_dir }}/.ansible-bootstrap-admin-created
+
+  handlers:
+    - name: Restart Keycloak
+      ansible.builtin.systemd:
+        name: keycloak
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart BIND9
+      ansible.builtin.service:
+        name: bind9
+        state: restarted
+
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+    - name: Validate the target operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: This playbook currently supports Debian and Ubuntu hosts.
+
+    - name: Require the controller-side Keycloak environment file
+      ansible.builtin.assert:
+        that:
+          - >-
+            lookup('ansible.builtin.file', keycloak_env_file, errors='ignore')
+            | default('', true) | length > 0
+        fail_msg: >-
+          {{ keycloak_env_file }} is missing. Create it and define the four
+          KEYCLOAK_* credential variables documented in README.md.
+        quiet: true
+
+    - name: Load Keycloak credentials from the environment file
+      ansible.builtin.set_fact:
+        keycloak_db_username: >-
+          {{ lookup('ansible.builtin.ini', 'KEYCLOAK_DB_USERNAME',
+                    type='properties', file=keycloak_env_file,
+                    case_sensitive=true) }}
+        keycloak_db_password: >-
+          {{ lookup('ansible.builtin.ini', 'KEYCLOAK_DB_PASSWORD',
+                    type='properties', file=keycloak_env_file,
+                    case_sensitive=true) }}
+        keycloak_bootstrap_admin_username: >-
+          {{ lookup('ansible.builtin.ini', 'KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME',
+                    type='properties', file=keycloak_env_file,
+                    case_sensitive=true) }}
+        keycloak_bootstrap_admin_password: >-
+          {{ lookup('ansible.builtin.ini', 'KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD',
+                    type='properties', file=keycloak_env_file,
+                    case_sensitive=true) }}
+      no_log: true
+
+    - name: Validate Keycloak credentials
+      ansible.builtin.assert:
+        that:
+          - keycloak_db_username | length > 0
+          - keycloak_db_password | length >= 16
+          - not keycloak_db_password.startswith('CHANGE_ME_')
+          - keycloak_bootstrap_admin_username | length > 0
+          - keycloak_bootstrap_admin_password | length >= 16
+          - not keycloak_bootstrap_admin_password.startswith('CHANGE_ME_')
+          - "'\n' not in keycloak_db_password"
+          - "'\n' not in keycloak_bootstrap_admin_password"
+          - keycloak_db == "postgres"
+        fail_msg: >-
+          Define all four KEYCLOAK_* credentials in {{ keycloak_env_file }}.
+          Replace both CHANGE_ME values; passwords must contain at least 16
+          characters.
+        quiet: true
+
+  tasks:
+    - name: Install Keycloak runtime dependencies
+      ansible.builtin.apt:
+        name:
+          - acl
+          - ca-certificates
+          - "{{ keycloak_java_package }}"
+          - openssl
+        state: present
+        update_cache: true
+
+    - name: Install managed PostgreSQL dependencies
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - python3-psycopg2
+        state: present
+      when: keycloak_manage_postgresql | bool
+
+    - name: Install BIND zone validation tooling
+      ansible.builtin.apt:
+        name: bind9-utils
+        state: present
+      when: keycloak_publish_lab_dns | bool
+
+    - name: Create the Keycloak system group
+      ansible.builtin.group:
+        name: "{{ keycloak_group }}"
+        system: true
+        state: present
+
+    - name: Create the Keycloak system user
+      ansible.builtin.user:
+        name: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+        home: "{{ keycloak_data_dir }}"
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: false
+        state: present
+
+    - name: Create Keycloak directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - path: "{{ keycloak_config_dir }}"
+          owner: root
+          group: "{{ keycloak_group }}"
+          mode: "0750"
+        - path: "{{ keycloak_tls_dir }}"
+          owner: root
+          group: "{{ keycloak_group }}"
+          mode: "0750"
+        - path: "{{ keycloak_data_dir }}"
+          owner: "{{ keycloak_user }}"
+          group: "{{ keycloak_group }}"
+          mode: "0750"
+        - path: "{{ keycloak_download_dir }}"
+          owner: root
+          group: root
+          mode: "0755"
+
+    - name: Start and enable PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        enabled: true
+        state: started
+      when: keycloak_manage_postgresql | bool
+
+    - name: Read the managed PostgreSQL server version
+      ansible.builtin.command:
+        argv:
+          - psql
+          - --tuples-only
+          - --no-align
+          - --command
+          - SHOW server_version
+      become_user: postgres
+      register: keycloak_postgresql_version
+      changed_when: false
+      when: keycloak_manage_postgresql | bool
+
+    - name: Require a supported PostgreSQL server version
+      ansible.builtin.assert:
+        that:
+          - keycloak_postgresql_version.stdout | trim | split('.') | first | int >= 14
+        fail_msg: >-
+          Keycloak {{ keycloak_version }} requires PostgreSQL 14 or newer, but
+          this host provides PostgreSQL {{ keycloak_postgresql_version.stdout | trim }}.
+          Upgrade the host database or set keycloak_manage_postgresql=false and
+          configure keycloak_db_host to use a supported external PostgreSQL server.
+      when: keycloak_manage_postgresql | bool
+
+    - name: Create the Keycloak PostgreSQL role
+      community.postgresql.postgresql_user:
+        name: "{{ keycloak_db_username }}"
+        password: "{{ keycloak_db_password }}"
+        role_attr_flags: LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE
+        login_unix_socket: /var/run/postgresql
+        state: present
+      become_user: postgres
+      when: keycloak_manage_postgresql | bool
+      no_log: true
+
+    - name: Create the Keycloak PostgreSQL database
+      community.postgresql.postgresql_db:
+        name: "{{ keycloak_db_name }}"
+        owner: "{{ keycloak_db_username }}"
+        encoding: UTF8
+        template: template0
+        login_unix_socket: /var/run/postgresql
+        state: present
+      become_user: postgres
+      when: keycloak_manage_postgresql | bool
+
+    - name: Download the Keycloak distribution
+      ansible.builtin.get_url:
+        url: "{{ keycloak_archive_url }}"
+        dest: "{{ keycloak_download_dir }}/keycloak-{{ keycloak_version }}.tar.gz"
+        checksum: "{{ keycloak_archive_checksum }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Extract the Keycloak distribution
+      ansible.builtin.unarchive:
+        src: "{{ keycloak_download_dir }}/keycloak-{{ keycloak_version }}.tar.gz"
+        dest: /opt
+        remote_src: true
+        creates: "{{ keycloak_install_dir }}/bin/kc.sh"
+
+    - name: Protect the extracted Keycloak distribution
+      ansible.builtin.file:
+        path: "{{ keycloak_install_dir }}"
+        state: directory
+        owner: root
+        group: "{{ keycloak_group }}"
+        recurse: true
+
+    - name: Inspect the distribution data path
+      ansible.builtin.stat:
+        path: "{{ keycloak_install_dir }}/data"
+        follow: false
+      register: keycloak_distribution_data
+
+    - name: Check that a distribution data directory is empty
+      ansible.builtin.find:
+        paths: "{{ keycloak_install_dir }}/data"
+        file_type: any
+        hidden: true
+        recurse: false
+      register: keycloak_distribution_data_contents
+      when:
+        - keycloak_distribution_data.stat.exists
+        - keycloak_distribution_data.stat.isdir | default(false)
+
+    - name: Refuse to replace a non-empty distribution data directory
+      ansible.builtin.assert:
+        that:
+          - keycloak_distribution_data_contents.matched == 0
+        fail_msg: >-
+          {{ keycloak_install_dir }}/data contains files. Move them to
+          {{ keycloak_data_dir }} before rerunning the playbook.
+      when:
+        - keycloak_distribution_data.stat.exists
+        - keycloak_distribution_data.stat.isdir | default(false)
+
+    - name: Remove the empty distribution data directory
+      ansible.builtin.file:
+        path: "{{ keycloak_install_dir }}/data"
+        state: absent
+      when:
+        - keycloak_distribution_data.stat.exists
+        - keycloak_distribution_data.stat.isdir | default(false)
+
+    - name: Link Keycloak to its persistent data directory
+      ansible.builtin.file:
+        src: "{{ keycloak_data_dir }}"
+        dest: "{{ keycloak_install_dir }}/data"
+        state: link
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+
+    - name: Point the stable Keycloak path at the selected version
+      ansible.builtin.file:
+        src: "{{ keycloak_install_dir }}"
+        dest: "{{ keycloak_home }}"
+        state: link
+        force: true
+      notify: Restart Keycloak
+
+    - name: Check lab CA files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ keycloak_ca_dir }}/ca.example.test.crt"
+        - "{{ keycloak_ca_dir }}/ca.example.test.key"
+      register: keycloak_ca_files
+
+    - name: Require the lab CA before issuing the Keycloak certificate
+      ansible.builtin.assert:
+        that:
+          - keycloak_ca_files.results[0].stat.exists
+          - keycloak_ca_files.results[1].stat.exists
+        fail_msg: >-
+          The lab CA is missing under {{ keycloak_ca_dir }}. Run
+          install_infra-services.yml before install_keycloak.yml.
+
+    - name: Generate the Keycloak TLS private key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - genrsa
+          - -out
+          - "{{ keycloak_tls_dir }}/keycloak-key.pem"
+          - "3072"
+        creates: "{{ keycloak_tls_dir }}/keycloak-key.pem"
+      notify: Restart Keycloak
+
+    - name: Generate the Keycloak TLS certificate request
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -new
+          - -key
+          - "{{ keycloak_tls_dir }}/keycloak-key.pem"
+          - -subj
+          - "/C=SK/O=LabCA/CN={{ keycloak_hostname }}"
+          - -addext
+          - "subjectAltName=DNS:{{ keycloak_hostname }},IP:{{ ansible_host }}"
+          - -out
+          - "{{ keycloak_tls_dir }}/keycloak.csr"
+        creates: "{{ keycloak_tls_dir }}/keycloak.csr"
+      notify: Restart Keycloak
+
+    - name: Sign the Keycloak TLS certificate with the lab CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - "{{ keycloak_tls_dir }}/keycloak.csr"
+          - -CA
+          - "{{ keycloak_ca_dir }}/ca.example.test.crt"
+          - -CAkey
+          - "{{ keycloak_ca_dir }}/ca.example.test.key"
+          - -CAcreateserial
+          - -out
+          - "{{ keycloak_tls_dir }}/keycloak-cert.pem"
+          - -days
+          - "825"
+          - -sha256
+          - -copy_extensions
+          - copy
+        creates: "{{ keycloak_tls_dir }}/keycloak-cert.pem"
+      notify: Restart Keycloak
+
+    - name: Copy the lab CA certificate for Keycloak
+      ansible.builtin.copy:
+        src: "{{ keycloak_ca_dir }}/ca.example.test.crt"
+        dest: "{{ keycloak_tls_dir }}/keycloak-ca.pem"
+        remote_src: true
+        owner: root
+        group: "{{ keycloak_group }}"
+        mode: "0644"
+      notify: Restart Keycloak
+
+    - name: Set Keycloak TLS file permissions
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: "{{ keycloak_group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - path: "{{ keycloak_tls_dir }}/keycloak-key.pem"
+          mode: "0640"
+        - path: "{{ keycloak_tls_dir }}/keycloak-cert.pem"
+          mode: "0644"
+        - path: "{{ keycloak_tls_dir }}/keycloak.csr"
+          mode: "0644"
+      notify: Restart Keycloak
+
+    - name: Install the Keycloak server configuration
+      ansible.builtin.copy:
+        dest: "{{ keycloak_config_dir }}/keycloak.conf"
+        owner: root
+        group: "{{ keycloak_group }}"
+        mode: "0640"
+        content: |
+          # Managed by Ansible.
+          db={{ keycloak_db }}
+          db-url=jdbc:postgresql://{{ keycloak_db_host }}:{{ keycloak_db_port }}/{{ keycloak_db_name }}
+
+          hostname=https://{{ keycloak_hostname }}:{{ keycloak_https_port }}
+          http-enabled=false
+          https-port={{ keycloak_https_port }}
+          https-certificate-file={{ keycloak_tls_dir }}/keycloak-cert.pem
+          https-certificate-key-file={{ keycloak_tls_dir }}/keycloak-key.pem
+
+          health-enabled=true
+          metrics-enabled=true
+          http-management-host=127.0.0.1
+          http-management-port={{ keycloak_management_port }}
+          http-management-scheme=http
+      notify: Restart Keycloak
+
+    - name: Install the protected Keycloak environment file
+      ansible.builtin.copy:
+        dest: "{{ keycloak_config_dir }}/keycloak.env"
+        owner: root
+        group: "{{ keycloak_group }}"
+        mode: "0640"
+        content: |
+          KC_DB_USERNAME={{ keycloak_db_username | quote }}
+          KCRAW_DB_PASSWORD={{ keycloak_db_password | quote }}
+          JAVA_OPTS_APPEND={{ keycloak_java_opts | quote }}
+      no_log: true
+      notify: Restart Keycloak
+
+    - name: Check whether the bootstrap administrator has been created
+      ansible.builtin.stat:
+        path: "{{ keycloak_bootstrap_marker }}"
+      register: keycloak_bootstrap
+
+    - name: Install the one-time bootstrap administrator environment file
+      ansible.builtin.copy:
+        dest: "{{ keycloak_config_dir }}/keycloak-bootstrap.env"
+        owner: root
+        group: "{{ keycloak_group }}"
+        mode: "0640"
+        content: |
+          KC_BOOTSTRAP_ADMIN_USERNAME={{ keycloak_bootstrap_admin_username | quote }}
+          KCRAW_BOOTSTRAP_ADMIN_PASSWORD={{ keycloak_bootstrap_admin_password | quote }}
+      when: not keycloak_bootstrap.stat.exists
+      no_log: true
+      notify: Restart Keycloak
+
+    - name: Keep bootstrap credentials removed after initial startup
+      ansible.builtin.file:
+        path: "{{ keycloak_config_dir }}/keycloak-bootstrap.env"
+        state: absent
+      when: keycloak_bootstrap.stat.exists
+
+    - name: Check whether the optimized Keycloak build exists
+      ansible.builtin.stat:
+        path: "{{ keycloak_build_marker }}"
+      register: keycloak_build
+
+    - name: Build the optimized Keycloak server
+      ansible.builtin.command:
+        argv:
+          - "{{ keycloak_install_dir }}/bin/kc.sh"
+          - "--config-file={{ keycloak_config_dir }}/keycloak.conf"
+          - build
+      when: not keycloak_build.stat.exists
+      notify: Restart Keycloak
+
+    - name: Record the optimized Keycloak build
+      ansible.builtin.file:
+        path: "{{ keycloak_build_marker }}"
+        state: touch
+        owner: root
+        group: "{{ keycloak_group }}"
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+      when: not keycloak_build.stat.exists
+
+    - name: Install the Keycloak systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/keycloak.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Keycloak Identity and Access Management
+          Documentation=https://www.keycloak.org/documentation
+          Wants=network-online.target
+          After=network-online.target{% if keycloak_manage_postgresql | bool %} postgresql.service{% endif %}
+
+          [Service]
+          Type=simple
+          User={{ keycloak_user }}
+          Group={{ keycloak_group }}
+          EnvironmentFile={{ keycloak_config_dir }}/keycloak.env
+          EnvironmentFile=-{{ keycloak_config_dir }}/keycloak-bootstrap.env
+          WorkingDirectory={{ keycloak_home }}
+          ExecStart={{ keycloak_home }}/bin/kc.sh --config-file={{ keycloak_config_dir }}/keycloak.conf start --optimized
+          Restart=on-failure
+          RestartSec=10s
+          TimeoutStartSec=300s
+          TimeoutStopSec=60s
+          SuccessExitStatus=143
+          LimitNOFILE=102642
+          UMask=0027
+
+          NoNewPrivileges=true
+          PrivateDevices=true
+          PrivateTmp=true
+          ProtectControlGroups=true
+          ProtectHome=true
+          ProtectHostname=true
+          ProtectKernelModules=true
+          ProtectKernelTunables=true
+          ProtectSystem=strict
+          RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+          RestrictSUIDSGID=true
+          ReadWritePaths={{ keycloak_data_dir }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart Keycloak
+
+    - name: Publish Keycloak in lab DNS
+      ansible.builtin.copy:
+        src: "{{ keycloak_dns_zone_source }}"
+        dest: /etc/bind/zones/net.example.test
+        owner: root
+        group: root
+        mode: "0644"
+        validate: /usr/bin/named-checkzone example.test %s
+      when: keycloak_publish_lab_dns | bool
+      notify: Restart BIND9
+
+    - name: Enable and start Keycloak
+      ansible.builtin.systemd:
+        name: keycloak
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply pending Keycloak and DNS changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for Keycloak to become ready
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ keycloak_management_port }}/health/ready"
+        method: GET
+        status_code: 200
+        return_content: true
+        use_proxy: false
+      register: keycloak_health
+      retries: 30
+      delay: 5
+      until:
+        - keycloak_health.status == 200
+        - keycloak_health.json.status == "UP"
+
+    - name: Remove bootstrap credentials after successful startup
+      ansible.builtin.file:
+        path: "{{ keycloak_config_dir }}/keycloak-bootstrap.env"
+        state: absent
+      when: not keycloak_bootstrap.stat.exists
+
+    - name: Record successful bootstrap administrator creation
+      ansible.builtin.file:
+        path: "{{ keycloak_bootstrap_marker }}"
+        state: touch
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+        mode: "0600"
+        modification_time: preserve
+        access_time: preserve
+      when: not keycloak_bootstrap.stat.exists

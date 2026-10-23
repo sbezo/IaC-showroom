@@ -1,0 +1,36 @@
+# Local secrets (keep the public templates)
+.env
+.env.*
+!.env_example
+.owner.env
+*.env
+.ansible_vault
+*.key
+*.pem
+*.crt
+*.csr
+*.srl
+certs/
+ca.example.test/
+ssh_deploy_keys/
+
+# Terraform runtime state; keep source and the provider lock file
+.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+
+# Runtime data and local tooling
+raw_emails/
+processed.txt
+*.db
+*.sqlite*
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+*.retry
+*.log

@@ -1,0 +1,23 @@
+# replace "n8n.example.test" with new hostname as needed
+
+cd /ca.example.test
+mkdir n8n.example.test
+
+# n8n private key
+openssl genrsa -out n8n.example.test/n8n.example.test.key 2048
+
+# n8n CSR
+openssl req -new -key n8n.example.test/n8n.example.test.key \
+  -subj "/C=SK/O=LabCA/CN=n8n.example.test" \
+  -addext "subjectAltName=DNS:n8n.example.test" \
+  -out n8n.example.test/n8n.example.test.csr
+
+# Sign CSR with CA
+openssl x509 -req -in n8n.example.test/n8n.example.test.csr -CA ca.example.test/ca.example.test.crt -CAkey ca.example.test/ca.example.test.key \
+  -CAcreateserial -out n8n.example.test/n8n.example.test.crt -days 365 -sha256 \
+  -copy_extensions copy
+
+chown -R ubuntu:ubuntu n8n.example.test/
+
+# copy certs (called from remote host)
+# scp -r ubuntu@192.0.2.10:/ca.example.test/n8n.example.test ./

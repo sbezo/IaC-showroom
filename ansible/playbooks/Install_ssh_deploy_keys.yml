@@ -1,0 +1,40 @@
+- hosts: app-host
+  gather_facts: false
+  become: yes
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Create deploy user
+      ansible.builtin.user:
+        name: deploy
+        state: present
+        create_home: yes
+        shell: /bin/bash
+        password_lock: true
+        update_password: on_create
+
+    - name: Create the SSH directory
+      ansible.builtin.file:
+        path: /home/deploy/.ssh
+        state: directory
+        owner: deploy
+        group: deploy
+        mode: '0700'
+
+    - name: Ensure GitLab deploy key is in authorized_keys
+      ansible.builtin.lineinfile:
+        path: /home/deploy/.ssh/authorized_keys
+        line: "{{ lookup('file', root_dir + '/gitlab/ssh_deploy_keys/gitlab_deploy.pub') }}"
+        create: yes
+        owner: deploy
+        group: deploy
+        mode: '0600'
+
+    - name: Add user deploy to docker group
+      ansible.builtin.user:
+        name: deploy
+        groups: docker
+        append: yes

@@ -1,0 +1,110 @@
+- name: Install scripts API
+  hosts: app-host
+  gather_facts: false
+  become: yes
+  vars:
+    scripts_api_source_dir: "{{ root_dir }}/scripts_via_api"
+  pre_tasks:
+    - name: Stop public reference playbooks
+      ansible.builtin.fail:
+        msg: "Reference only. Adapt this playbook and remove this guard in your own lab."
+
+  tasks:
+    - name: Create scripts API directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /opt/scripts_via_api
+        - /opt/scripts_via_api/email
+
+    - name: Copy scripts API application and Compose files
+      ansible.builtin.copy:
+        src: "{{ scripts_api_source_dir }}/{{ item }}"
+        dest: "/opt/scripts_via_api/{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        # Keep this list aligned with Dockerfile and .dockerignore.
+        # Local email data, history and __pycache__ are not deployment inputs.
+        - docker-compose.yml
+        - Dockerfile
+        - .dockerignore
+        - requirements.txt
+        - api.py
+        - email/process_emails.py
+        - email/init_db.py
+      notify: Restart scripts API
+
+    - name: Copy scripts API credentials
+      ansible.builtin.copy:
+        src: "{{ scripts_api_source_dir }}/.env"
+        dest: /opt/scripts_via_api/.env
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      diff: false
+      notify: Restart scripts API
+
+    - name: Remove obsolete deployed decryption key file
+      ansible.builtin.file:
+        path: /opt/scripts_via_api/.env.keys
+        state: absent
+      no_log: true
+      diff: false
+      notify: Restart scripts API
+
+    - name: Deploy systemd service for scripts API
+      ansible.builtin.copy:
+        src: "{{ scripts_api_source_dir }}/scripts_via_api.service"
+        dest: /etc/systemd/system/scripts_via_api.service
+        owner: root
+        group: root
+        mode: '0644'
+      register: scripts_api_service
+      notify: Restart scripts API
+
+    - name: Reload systemd to pick up the service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      when: scripts_api_service.changed
+
+    - name: Apply pending scripts API changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start scripts API service
+      ansible.builtin.systemd:
+        name: scripts_via_api
+        enabled: yes
+        state: started
+
+    - name: Check scripts API health
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/docker
+          - compose
+          - --env-file
+          - /dev/null
+          - exec
+          - -T
+          - scripts-api
+          - python
+          - -c
+          - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"
+        chdir: /opt/scripts_via_api
+      register: scripts_api_health
+      changed_when: false
+      until: scripts_api_health.rc == 0
+      retries: 12
+      delay: 5
+
+  handlers:
+    - name: Restart scripts API
+      ansible.builtin.systemd:
+        name: scripts_via_api
+        state: restarted
